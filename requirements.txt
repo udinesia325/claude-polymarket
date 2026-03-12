@@ -1,0 +1,28 @@
+# Polymarket official CLOB SDK
+py-clob-client>=0.18.0
+
+# Blockchain / wallet
+web3>=6.15.0
+
+# Claude AI decision engine
+anthropic>=0.40.0
+
+# Telegram notifications
+python-telegram-bot>=21.0
+
+# Scheduler
+APScheduler>=3.10.4
+
+# Env loading
+python-dotenv>=1.0.0
+
+# HTTP requests (news scraping, copy-trader data)
+httpx>=0.27.0
+beautifulsoup4>=4.12.0
+lxml>=5.1.0
+
+# Data handling
+pydantic>=2.6.0
+
+# Logging
+structlog>=24.1.0

@@ -1,0 +1,21 @@
+# Never bake secrets into the image
+.env.fake
+.env.real
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Dev tools
+.git/
+.gitignore
+*.md
+.venv/
+venv/
