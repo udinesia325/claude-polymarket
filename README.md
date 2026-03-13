@@ -127,6 +127,48 @@ See `.env.example` for full documentation of every variable.
 - On GCP, the deploy script copies env files over SCP (never in source code)
 - For production, consider using GCP Secret Manager instead of env files
 
+Cara Deploy ke Google Cloud VPS
+Langkah 1 — Setup VPS (sekali saja)
+
+# SSH ke server, lalu:
+sudo bash scripts/deploy-vps.sh
+Langkah 2 — Upload kode
+
+# Dari laptop, jalankan ini:
+rsync -av --exclude='.env.*' --exclude='.git' \
+  ./ user@IP_SERVER:/opt/polymarket/
+Langkah 3 — Buat env file di server
+
+# Di server:
+nano /opt/polymarket/.env.fake   # isi semua nilai
+nano /opt/polymarket/.env.real   # isi semua nilai
+File ini tidak pernah masuk ke image — hanya ada di server, di-mount saat container run.
+
+Langkah 4 — Build image
+
+cd /opt/polymarket
+docker build -t polymarket-bot .
+Langkah 5 — Jalankan
+
+bash scripts/run-fake.sh   # testnet
+bash scripts/run-real.sh   # mainnet (ada konfirmasi dulu)
+Perintah Berguna
+
+docker logs -f polymarket-fake     # lihat log realtime
+docker logs -f polymarket-real
+
+docker stop polymarket-real        # stop bot
+docker restart polymarket-fake     # restart bot
+
+# Update kode (setelah rsync ulang):
+docker build -t polymarket-bot . && bash scripts/run-fake.sh
+Keamanan
+Status
+Secret di dalam image	Tidak pernah
+Secret di-mount read-only	Ya (:ro)
+Auto-restart kalau crash	Ya (--restart always)
+Konfirmasi sebelum run real	Ya (ketik yes)
+
 
 
 Next steps:
