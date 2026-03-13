@@ -7,6 +7,7 @@ Uses python-telegram-bot in sync (non-async) mode via the Bot.send_message
 convenience wrapper so it works cleanly inside APScheduler jobs.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -26,7 +27,6 @@ _STATUS = {True: "✅", False: "❌"}
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._bot = telegram.Bot(token=settings.telegram_bot_token)
         self._chat_id = settings.telegram_chat_id
         logger.info("TelegramNotifier ready | chat_id=%s", self._chat_id)
 
@@ -120,11 +120,14 @@ class TelegramNotifier:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _send(self, text: str) -> None:
+        async def _do_send():
+            async with telegram.Bot(token=self.settings.telegram_bot_token) as bot:
+                await bot.send_message(
+                    chat_id=self._chat_id,
+                    text=text,
+                    parse_mode="Markdown",
+                )
         try:
-            self._bot.send_message(
-                chat_id=self._chat_id,
-                text=text,
-                parse_mode="Markdown",
-            )
+            asyncio.run(_do_send())
         except Exception as exc:
             logger.error("Telegram send failed: %s", exc)

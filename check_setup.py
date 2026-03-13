@@ -127,20 +127,25 @@ except Exception as e:
 # ── 5. Telegram ───────────────────────────────────────────────────────────────
 print("\n[ 5 ] Telegram")
 try:
+    import asyncio
     import telegram
-    bot = telegram.Bot(token=settings.telegram_bot_token)
-    bot_info = bot.get_me()
-    ok("Telegram bot token valid", f"@{bot_info.username}")
-    try:
-        bot.send_message(
-            chat_id=settings.telegram_chat_id,
-            text="✅ *Polymarket Bot* — setup check berhasil!",
-            parse_mode="Markdown",
-        )
-        ok("Pesan test berhasil dikirim ke chat_id", settings.telegram_chat_id)
-    except Exception as e:
-        fail("Gagal kirim pesan ke TELEGRAM_CHAT_ID", str(e))
-        warn("Pastikan kamu sudah pernah mengirim pesan ke bot terlebih dahulu")
+
+    async def _check_telegram():
+        async with telegram.Bot(token=settings.telegram_bot_token) as bot:
+            bot_info = await bot.get_me()
+            ok("Telegram bot token valid", f"@{bot_info.username}")
+            try:
+                await bot.send_message(
+                    chat_id=settings.telegram_chat_id,
+                    text="✅ *Polymarket Bot* — setup check berhasil!",
+                    parse_mode="Markdown",
+                )
+                ok("Pesan test berhasil dikirim ke chat_id", settings.telegram_chat_id)
+            except Exception as e:
+                fail("Gagal kirim pesan ke TELEGRAM_CHAT_ID", str(e))
+                warn("Pastikan kamu sudah pernah mengirim pesan ke bot terlebih dahulu")
+
+    asyncio.run(_check_telegram())
 except Exception as e:
     fail("Telegram bot token tidak valid", str(e))
 

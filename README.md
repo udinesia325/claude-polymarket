@@ -127,61 +127,89 @@ See `.env.example` for full documentation of every variable.
 - On GCP, the deploy script copies env files over SCP (never in source code)
 - For production, consider using GCP Secret Manager instead of env files
 
-Cara Deploy ke Google Cloud VPS
-Langkah 1 — Setup VPS (sekali saja)
+## Deploy ke VPS (Docker)
 
-# SSH ke server, lalu:
+### Langkah 1 — Setup VPS (sekali saja)
+
+```bash
+# SSH ke server, lalu jalankan:
 sudo bash scripts/deploy-vps.sh
-Langkah 2 — Upload kode
+```
 
-# Dari laptop, jalankan ini:
+### Langkah 2 — Upload kode (dari laptop)
+
+File `.env.*` **tidak ikut di-upload** karena berisi private key.
+
+```bash
 rsync -av --exclude='.env.*' --exclude='.git' \
   ./ user@IP_SERVER:/opt/polymarket/
-Langkah 3 — Buat env file di server
+```
 
-# Di server:
-nano /opt/polymarket/.env.fake   # isi semua nilai
-nano /opt/polymarket/.env.real   # isi semua nilai
-File ini tidak pernah masuk ke image — hanya ada di server, di-mount saat container run.
+### Langkah 3 — Upload env file (dari laptop)
 
-Langkah 4 — Build image
+Lebih aman copy langsung dari laptop daripada mengetik ulang di server:
 
+```bash
+scp .env.fake user@IP_SERVER:/opt/polymarket/.env.fake
+scp .env.real user@IP_SERVER:/opt/polymarket/.env.real   # jika pakai real mode
+```
+
+> File ini tidak pernah masuk ke Docker image — hanya ada di server dan di-mount
+> saat container run (`-v .env.fake:/app/.env.fake:ro`).
+
+### Langkah 4 — Build image (di server)
+
+Hanya perlu dijalankan sekali, atau setiap kali **kode** berubah.
+Jika hanya mengubah nilai di `.env.*`, **tidak perlu rebuild**.
+
+```bash
 cd /opt/polymarket
 docker build -t polymarket-bot .
-Langkah 5 — Jalankan
+```
 
-bash scripts/run-fake.sh   # testnet
-bash scripts/run-real.sh   # mainnet (ada konfirmasi dulu)
-Perintah Berguna
+### Langkah 5 — Jalankan bot
 
-docker logs -f polymarket-fake     # lihat log realtime
-docker logs -f polymarket-real
+```bash
+bash scripts/run-fake.sh   # fake mode: DRY_RUN=true, tidak ada order real
+bash scripts/run-real.sh   # real mode: ada konfirmasi ketik "yes" dulu
+```
 
-docker stop polymarket-real        # stop bot
-docker restart polymarket-fake     # restart bot
+### Update nilai env tanpa rebuild
 
-# Update kode (setelah rsync ulang):
-docker build -t polymarket-bot . && bash scripts/run-fake.sh
-Keamanan
-Status
-Secret di dalam image	Tidak pernah
-Secret di-mount read-only	Ya (:ro)
-Auto-restart kalau crash	Ya (--restart always)
-Konfirmasi sebelum run real	Ya (ketik yes)
+```bash
+# 1. Edit .env.fake di laptop
+# 2. Upload ulang ke server
+scp .env.fake user@IP_SERVER:/opt/polymarket/.env.fake
+# 3. Restart container (tidak perlu rebuild image)
+ssh user@IP_SERVER 'bash /opt/polymarket/scripts/run-fake.sh'
+```
 
+### Update kode
 
+```bash
+# 1. Upload kode terbaru
+rsync -av --exclude='.env.*' --exclude='.git' ./ user@IP_SERVER:/opt/polymarket/
+# 2. Rebuild image dan restart
+ssh user@IP_SERVER 'cd /opt/polymarket && docker build -t polymarket-bot . && bash scripts/run-fake.sh'
+```
 
-Next steps:
-  1. Copy your source code to this server:
-     rsync -av --exclude='.env.*' ./ user@YOUR_IP:/opt/polymarket/
+### Perintah Berguna
 
-  2. Create your env files on the server:
-     nano /opt/polymarket/.env.fake   # for testnet
-     nano /opt/polymarket/.env.real   # for mainnet
+```bash
+docker logs -f polymarket-fake     # lihat log realtime (fake mode)
+docker logs -f polymarket-real     # lihat log realtime (real mode)
 
-  3. Build the Docker image (run from /opt/polymarket):
-     docker build -t polymarket-bot .
+docker stop polymarket-fake        # stop bot fake
+docker stop polymarket-real        # stop bot real
 
-  4. Start the bot (choose fake or real):
-     bash scripts/run-fake.sh
-     bash scripts/run-real.sh
+docker restart polymarket-fake     # restart bot fake
+```
+
+### Keamanan
+
+| Aspek | Status |
+|---|---|
+| Secret di dalam image | Tidak pernah |
+| Secret di-mount read-only | Ya (`:ro`) |
+| Auto-restart kalau crash | Ya (`--restart always`) |
+| Konfirmasi sebelum run real | Ya (ketik `yes`) |
