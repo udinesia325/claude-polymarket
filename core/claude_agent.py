@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert prediction market trader on Polymarket.
-Your job is to analyse market data and decide whether to place a trade.
+Your job is to analyse market data and estimate the TRUE probability of events.
 
 Today's date: {today}
 
@@ -36,40 +36,70 @@ Today's date: {today}
 ## What you receive
 1. Market metadata (question, end date, prices, liquidity, 24h volume)
 2. Order book depth summary (best bid/ask, depth at 3 levels)
-3. Recent news headlines related to the market
+3. Recent news articles (title + content snippets) related to the market
 4. (Optional) Copy-trader positions and recent trades
-5. Current portfolio state (open positions, exposure, P&L)
+5. (Optional) Whale activity (top profitable wallets' positions on this market)
+6. Current portfolio state (open positions, exposure, P&L)
 
 ## Your output
 Return ONLY a valid JSON object — no markdown, no commentary:
 {{
   "action": "BUY_YES" | "BUY_NO" | "SKIP",
-  "confidence": <float 0.0–1.0>,
-  "size_usdc": <float, suggested order size in USDC>,
+  "estimated_probability": <float 0.0–1.0, your estimate of the TRUE probability of YES>,
+  "confidence": <float 0.0–1.0, how confident you are in your estimate>,
   "price": <float 0.0–1.0, limit price to bid>,
-  "reasoning": "<1-3 sentence explanation of your edge>",
+  "reasoning": "<1-3 sentence explanation of your edge, referencing specific news or data>",
   "risk_factors": ["<factor1>", "<factor2>"]
 }}
+
+NOTE: You do NOT need to provide size_usdc — position sizing is calculated
+automatically using the Kelly Criterion based on your estimated_probability.
 
 ## Trading rules
 1. Only recommend BUY_YES or BUY_NO when confidence >= {min_confidence}.
    Below that threshold, always return SKIP.
-2. Your "confidence" reflects how sure you are that the TRUE probability
-   differs meaningfully from the current market price — not just your
-   estimate of the event probability itself.
-3. Size your position proportionally to your edge:
-   - Small edge (confidence 0.7–0.8): use 30–50% of max_order_size.
-   - Medium edge (0.8–0.9): use 50–75%.
-   - Strong edge (>0.9): up to 100% of max_order_size.
-4. Never suggest size_usdc above the max_order_size you are given.
+2. Your "estimated_probability" is your genuine assessment of the event's
+   true probability, based on ALL available data (news, order book, whale
+   activity, copy-traders). This is the most important field.
+3. Your "confidence" reflects how sure you are that your probability estimate
+   is accurate — NOT the event probability itself.
+   - 0.7-0.8: somewhat confident (limited data, ambiguous signals)
+   - 0.8-0.9: confident (clear news signals, data supports your view)
+   - 0.9-1.0: very confident (overwhelming evidence, multiple confirming sources)
+4. Choose BUY_YES when estimated_probability > yes_price (market underprices YES).
+   Choose BUY_NO when estimated_probability < yes_price (market overprices YES).
+   The bigger the gap, the stronger the edge.
 5. Prefer markets with liquidity > $1,000 USDC to ensure fills.
 6. Set your limit price between best_bid and best_ask (the spread).
    Never bid more than 5 percentage points above best_ask.
 7. If the market resolves within 24 hours and outcome is still uncertain, SKIP —
    resolution risk outweighs potential edge.
 8. If we already hold a position in this market, SKIP to avoid doubling exposure.
-9. Use copy-trader positions as a confirming signal, not the sole reason to trade.
+9. Use copy-trader/whale positions as confirming signals, not the sole reason to trade.
 10. If news is stale (>48h) or absent, weigh order book and price action more heavily.
+11. Always reference SPECIFIC news or data in your reasoning — never trade on vague intuition.
+
+## Domain expertise
+You have deep knowledge in these focus areas. Apply domain-specific reasoning:
+
+### Sports
+- Consider team form, injuries, head-to-head records, home/away advantage.
+- Recent results (last 5 games) matter more than season averages.
+- Pay attention to lineup confirmations and manager statements.
+- Betting odds from established bookmakers are strong reference points.
+
+### Crypto / Blockchain
+- Token price targets: check recent momentum, whale wallet movements, and exchange flows.
+- Regulatory news (SEC, CFTC, EU MiCA) can move markets dramatically.
+- Network metrics (TVL, active addresses, fees) provide fundamental signals.
+- Be cautious of hype cycles — distinguish genuine adoption from speculation.
+
+### Geopolitics (Iran, Middle East)
+- Official government statements vs actual actions — actions matter more.
+- Satellite imagery reports and shipping data override rhetoric.
+- Consider the source credibility: Reuters/AP > regional media > social media.
+- Sanctions, IAEA reports, and diplomatic meetings are leading indicators.
+- Multiple conflicting signals = high uncertainty = prefer SKIP.
 """
 
 
@@ -77,11 +107,13 @@ Return ONLY a valid JSON object — no markdown, no commentary:
 class TradeDecision:
     action: str             # "BUY_YES" | "BUY_NO" | "SKIP"
     confidence: float
+    estimated_probability: float  # Claude's estimate of true probability
     size_usdc: float
     price: float            # limit price (0–1)
     reasoning: str
     risk_factors: list[str]
     market_id: str
+    market_question: str
     yes_token_id: str
     no_token_id: str
 
@@ -202,10 +234,13 @@ class ClaudeAgent:
         ]
 
         if news:
-            news_lines = "\n".join(
-                f"- [{n['source']}] {n['title']} ({n['published']})" for n in news[:5]
-            )
-            parts.append(f"## Relevant News\n{news_lines}")
+            news_parts = []
+            for n in news[:5]:
+                line = f"- [{n['source']}] {n['title']} ({n['published']})"
+                if n.get("content"):
+                    line += f"\n  > {n['content'][:300]}"
+                news_parts.append(line)
+            parts.append(f"## Relevant News\n" + "\n".join(news_parts))
         else:
             parts.append("## Relevant News\nNo recent news found.")
 
@@ -220,6 +255,64 @@ class ClaudeAgent:
                 f"## Copy-Trader Recent Trades (last 5)\n"
                 + json.dumps(copy_trades[:5], indent=2)
             )
+
+        # Whale activity
+        whale_activity = ctx.get("whale_activity", [])
+        if whale_activity:
+            whale_lines = "\n".join(
+                f"  - {w['address']} | {w['outcome']} | size={w['size']:.1f} | "
+                f"avg_price={w['avg_price']:.3f}"
+                for w in whale_activity
+            )
+            parts.append(f"## Whale Activity (Top Traders)\n{whale_lines}")
+
+        # Domain-specific data (football stats, crypto prices, etc.)
+        domain_data = ctx.get("domain_data")
+        if domain_data:
+            domain_type = domain_data.get("match_type") or domain_data.get("market_type", "")
+            if domain_type == "football":
+                domain_lines = [f"## Football Data"]
+                teams = domain_data.get("teams", [])
+                if teams:
+                    domain_lines.append(f"Match: {teams[0]} vs {teams[1]}")
+
+                for key in ("team_a_form", "team_b_form"):
+                    form = domain_data.get(key)
+                    if form and "last_5" in form:
+                        domain_lines.append(f"\n**{form['team']}** — {form['record']} | {form['goals']}")
+                        for r in form["last_5"]:
+                            domain_lines.append(f"  {r}")
+
+                h2h = domain_data.get("head_to_head")
+                if h2h:
+                    domain_lines.append(
+                        f"\nHead-to-head ({h2h['total_matches']} matches): "
+                        f"Home wins {h2h['home_wins']} | Away wins {h2h['away_wins']} | Draws {h2h['draws']}"
+                    )
+                parts.append("\n".join(domain_lines))
+
+            elif domain_type == "crypto":
+                domain_lines = ["## Crypto Market Data"]
+                for token in domain_data.get("tokens", []):
+                    domain_lines.append(
+                        f"\n**{token['coin']}** ({token['symbol']})"
+                        f"\n  Price: ${token['current_price_usd']:,.2f}"
+                        f"\n  24h: {token['price_change_24h_pct']:+.1f}% | "
+                        f"7d: {token['price_change_7d_pct']:+.1f}% | "
+                        f"30d: {token['price_change_30d_pct']:+.1f}%"
+                        f"\n  Market Cap: ${token['market_cap_usd']:,.0f}"
+                        f"\n  24h Volume: ${token['total_volume_24h_usd']:,.0f}"
+                        f"\n  ATH: ${token['ath_usd']:,.2f} ({token['ath_change_pct']:+.1f}% from ATH)"
+                    )
+                    trend = token.get("trend_7d")
+                    if trend:
+                        domain_lines.append(
+                            f"  7d Trend: ${trend['start']:,.2f} → ${trend['mid']:,.2f} → ${trend['end']:,.2f} ({trend['direction']})"
+                        )
+                price_target = domain_data.get("price_target")
+                if price_target:
+                    domain_lines.append(f"\nPrice target in question: ${price_target:,.2f}")
+                parts.append("\n".join(domain_lines))
 
         # Detailed portfolio with per-position breakdown
         position_details = portfolio.get("positions", [])
@@ -256,6 +349,37 @@ class ClaudeAgent:
             return match.group(1).strip()
         return raw.strip()
 
+    def _kelly_criterion_size(
+        self,
+        estimated_prob: float,
+        market_price: float,
+        action: str,
+    ) -> float:
+        """
+        Fractional Kelly Criterion for position sizing.
+        f = (p - m) / (1 - m) for BUY_YES
+        f = ((1 - p) - (1 - m)) / (1 - (1 - m)) = (m - p) / m for BUY_NO
+        Then multiply by KELLY_FRACTION (0.20) for safety.
+        """
+        KELLY_FRACTION = 0.20  # Use 20% of full Kelly to reduce variance
+
+        if action == "BUY_YES":
+            edge = estimated_prob - market_price
+            if edge <= 0:
+                return 0.0
+            kelly_f = edge / (1.0 - market_price) if market_price < 1.0 else 0.0
+        elif action == "BUY_NO":
+            edge = market_price - estimated_prob
+            if edge <= 0:
+                return 0.0
+            kelly_f = edge / market_price if market_price > 0.0 else 0.0
+        else:
+            return 0.0
+
+        kelly_f = max(0.0, min(1.0, kelly_f))
+        size = self.settings.max_order_size_usdc * kelly_f * KELLY_FRACTION
+        return min(size, self.settings.max_order_size_usdc)
+
     def _parse_response(self, raw: str, market: dict) -> TradeDecision:
         raw = self._strip_code_fences(raw)
 
@@ -271,27 +395,44 @@ class ClaudeAgent:
             action = "SKIP"
 
         confidence = float(data.get("confidence", 0.0))
-        size_usdc = min(
-            float(data.get("size_usdc", self.settings.max_order_size_usdc)),
-            self.settings.max_order_size_usdc,
-        )
+        estimated_prob = float(data.get("estimated_probability", 0.5))
         price = max(0.01, min(0.99, float(data.get("price", 0.5))))
+        market_yes_price = float(market.get("yes_price", 0.5))
+
+        # Kelly Criterion sizing
+        size_usdc = self._kelly_criterion_size(estimated_prob, market_yes_price, action)
+
+        # Scale down by confidence (lower confidence = smaller position)
+        size_usdc *= confidence
+
+        # Enforce minimum trade size
+        if size_usdc < 0.50:
+            if action != "SKIP":
+                logger.info(
+                    "Kelly size $%.2f too small (< $0.50), converting to SKIP", size_usdc,
+                )
+                action = "SKIP"
+            size_usdc = 0.0
 
         decision = TradeDecision(
             action=action,
             confidence=confidence,
-            size_usdc=size_usdc,
+            estimated_probability=estimated_prob,
+            size_usdc=round(size_usdc, 2),
             price=price,
             reasoning=data.get("reasoning", ""),
             risk_factors=data.get("risk_factors", []),
             market_id=market.get("condition_id", ""),
+            market_question=market.get("question", ""),
             yes_token_id=market.get("yes_token_id", ""),
             no_token_id=market.get("no_token_id", ""),
         )
 
         logger.info(
-            "Claude decision | action=%s | confidence=%.2f | size=%.2f | market=%r",
+            "Claude decision | action=%s | est_prob=%.2f | confidence=%.2f | "
+            "kelly_size=$%.2f | market=%r",
             decision.action,
+            decision.estimated_probability,
             decision.confidence,
             decision.size_usdc,
             market.get("question", "")[:50],
@@ -302,11 +443,13 @@ class ClaudeAgent:
         return TradeDecision(
             action="SKIP",
             confidence=0.0,
+            estimated_probability=0.5,
             size_usdc=0.0,
             price=0.0,
             reasoning=reason,
             risk_factors=[],
             market_id=market.get("condition_id", ""),
+            market_question=market.get("question", ""),
             yes_token_id=market.get("yes_token_id", ""),
             no_token_id=market.get("no_token_id", ""),
         )

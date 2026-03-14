@@ -67,6 +67,7 @@ Setiap N/3 menit (position monitor):
 | `MAX_TOTAL_EXPOSURE_USDC` | `100.0` | Total eksposur maksimal semua posisi |
 | `MAX_POSITIONS` | `5` | Jumlah posisi terbuka maksimal |
 | `STRATEGY` | `hybrid` | `copy_trader` / `news` / `hybrid` |
+| `TAVILY_API_KEY` | `""` | API key untuk Tavily news search (opsional, fallback ke Google RSS) |
 
 Dua env file: `.env.fake` (testnet) dan `.env.real` (mainnet).
 **Jangan pernah commit file `.env.*` ke git.**
@@ -79,7 +80,9 @@ Dua env file: `.env.fake` (testnet) dan `.env.real` (mainnet).
 - Diinjeksi dengan tanggal hari ini (`today`) dan `min_confidence` dari settings
   saat runtime — bukan hardcode.
 - Menjelaskan bahwa YES price = implied probability (bukan hanya angka harga).
-- Memandu position sizing proporsional terhadap edge (kecil/sedang/kuat).
+- Claude sekarang output `estimated_probability` (estimasi probabilitas sebenarnya)
+  — digunakan untuk Kelly Criterion sizing.
+- Position sizing dihitung otomatis via Kelly Criterion, bukan oleh Claude.
 - Rule: SKIP jika market resolves dalam 24 jam dan outcome masih tidak pasti.
 - Rule: SKIP jika kita sudah punya posisi di market yang sama.
 
@@ -107,9 +110,10 @@ Dict yang dikirim ke Claude berisi:
     "volume_24h_usdc", "liquidity_usdc", "tags"
   },
   "order_book_summary": {"best_bid", "best_ask", "bid_depth_3", "ask_depth_3"},
-  "news": [{"title", "source", "published"}],
+  "news": [{"title", "source", "published", "content"}],  # content dari Tavily
   "copy_trader_positions": [...],   # hanya jika strategy == copy_trader/hybrid
-  "copy_trader_recent_trades": [...]
+  "copy_trader_recent_trades": [...],
+  "whale_activity": [{"address", "outcome", "size", "avg_price"}]  # top traders
 }
 ```
 
@@ -137,13 +141,30 @@ portfolio summary, update juga bagian ini.
 
 ---
 
+## Position Sizing — Kelly Criterion (`claude_agent.py`)
+
+- Claude output `estimated_probability` → digunakan untuk hitung edge.
+- Formula: `f = (p - m) / (1 - m)` untuk BUY_YES, `f = (m - p) / m` untuk BUY_NO.
+- Fractional Kelly: 20% dari full Kelly untuk mengurangi variance.
+- Size di-scale lagi dengan `confidence` → low confidence = smaller position.
+- Minimum trade size: $0.50 — di bawah itu otomatis SKIP.
+- Hard cap: `MAX_ORDER_SIZE_USDC`.
+
 ## Risk Gates (Urutan Eksekusi di `executor.py`)
 
 1. `decision.is_skip` → return None
 2. `confidence < min_confidence_score` → return None
-3. `portfolio.can_open_position(size)` → cek max_positions & max_exposure
-4. `dry_run == True` → log saja, kembalikan OrderResult sukses palsu
-5. `_place_order()` → submit ke CLOB
+3. `kelly_size < $0.50` → auto-converted to SKIP
+4. `portfolio.can_open_position(size)` → cek max_positions & max_exposure
+5. `dry_run == True` → log + register virtual position (untuk deduplication)
+6. `_place_order()` → submit ke CLOB
+
+## Virtual Portfolio (Dry Run)
+
+- Saat dry run, order "sukses" didaftarkan sebagai virtual position di memory.
+- `portfolio.refresh()` merge virtual positions dengan real positions.
+- Ini mencegah bot re-trade market yang sama setiap siklus.
+- Virtual positions di-track di `PortfolioService._virtual_positions`.
 
 ---
 

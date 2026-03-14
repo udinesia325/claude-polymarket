@@ -14,11 +14,13 @@ from bs4 import BeautifulSoup
 from py_clob_client.client import ClobClient
 
 from config.settings import Settings
+from services.football_data import FootballDataService
+from services.coingecko import CoinGeckoService
 
 logger = logging.getLogger(__name__)
 
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
-GNEWS_RSS = "https://gnews.io/rss/search?q={query}&lang=en&max=5"
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 
 @dataclass
@@ -42,6 +44,7 @@ class NewsItem:
     url: str
     source: str
     published: str
+    content: str = ""  # article snippet (populated by Tavily)
 
 
 class MarketService:
@@ -49,6 +52,8 @@ class MarketService:
         self.settings = settings
         self.clob = clob_client
         self._http = httpx.Client(timeout=15)
+        self._football = FootballDataService(settings)
+        self._coingecko = CoinGeckoService()
 
     # ── Markets ───────────────────────────────────────────────────────────────
 
@@ -95,8 +100,42 @@ class MarketService:
             except Exception as exc:
                 logger.debug("Skipping malformed market: %s", exc)
 
-        logger.info("Fetched %d active markets", len(markets))
-        return markets
+        # Apply focus filters if configured
+        filtered = self._apply_focus_filter(markets)
+        logger.info("Fetched %d active markets | after focus filter: %d", len(markets), len(filtered))
+        return filtered
+
+    def _apply_focus_filter(self, markets: list[MarketSnapshot]) -> list[MarketSnapshot]:
+        """Filter markets by configured tags and keywords."""
+        focus_tags = [
+            t.strip().lower()
+            for t in self.settings.market_focus_tags.split(",")
+            if t.strip()
+        ]
+        focus_keywords = [
+            k.strip().lower()
+            for k in self.settings.market_focus_keywords.split(",")
+            if k.strip()
+        ]
+
+        if not focus_tags and not focus_keywords:
+            return markets  # No filter configured
+
+        result = []
+        for m in markets:
+            # Check tags
+            market_tags = [t.lower() for t in m.tags]
+            if focus_tags and any(ft in tag for ft in focus_tags for tag in market_tags):
+                result.append(m)
+                continue
+
+            # Check keywords in question
+            question_lower = m.question.lower()
+            if focus_keywords and any(kw in question_lower for kw in focus_keywords):
+                result.append(m)
+                continue
+
+        return result
 
     def get_order_book(self, token_id: str) -> dict:
         """Fetch order book from CLOB for a given outcome token."""
@@ -155,10 +194,50 @@ class MarketService:
 
     def scrape_news_for_market(self, question: str, max_items: int = 5) -> list[NewsItem]:
         """
-        Scrape recent news headlines relevant to a market question.
-        Uses GNews RSS (no API key needed for basic use).
+        Fetch news relevant to a market question.
+        Uses Tavily Search API if configured (returns full content snippets),
+        falls back to Google News RSS (headlines only).
         """
-        # Extract key terms from the question for the search query
+        if self.settings.tavily_api_key:
+            return self._tavily_search(question, max_items)
+        return self._google_news_rss(question, max_items)
+
+    def _tavily_search(self, question: str, max_items: int = 5) -> list[NewsItem]:
+        """Search via Tavily API — returns title + content snippets."""
+        try:
+            resp = self._http.post(
+                TAVILY_SEARCH_URL,
+                json={
+                    "api_key": self.settings.tavily_api_key,
+                    "query": question,
+                    "search_depth": "basic",
+                    "include_answer": False,
+                    "max_results": max_items,
+                    "topic": "news",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = []
+            for r in data.get("results", [])[:max_items]:
+                domain = r.get("url", "").split("/")[2] if r.get("url") else "Unknown"
+                results.append(NewsItem(
+                    title=r.get("title", ""),
+                    url=r.get("url", ""),
+                    source=domain,
+                    published=r.get("published_date", ""),
+                    content=r.get("content", ""),
+                ))
+            logger.info("Tavily returned %d results for %r", len(results), question[:40])
+            return results
+        except Exception as exc:
+            logger.warning("Tavily search failed: %s — falling back to Google RSS", exc)
+            return self._google_news_rss(question, max_items)
+
+    def _google_news_rss(self, question: str, max_items: int = 5) -> list[NewsItem]:
+        """Fallback: Google News RSS (headlines only, no content)."""
         query = " ".join(question.split()[:6])
         url = f"https://news.google.com/rss/search?q={httpx.URL(query)}&hl=en-US&gl=US&ceid=US:en"
 
@@ -178,7 +257,7 @@ class MarketService:
                 for item in items
             ]
         except Exception as exc:
-            logger.debug("News scrape failed for %r: %s", query, exc)
+            logger.debug("Google News RSS failed for %r: %s", query, exc)
             return []
 
     def get_market_context(self, market: MarketSnapshot) -> dict:
@@ -207,7 +286,12 @@ class MarketService:
             },
             "order_book_summary": self._summarise_order_book(order_book),
             "news": [
-                {"title": n.title, "source": n.source, "published": n.published}
+                {
+                    "title": n.title,
+                    "source": n.source,
+                    "published": n.published,
+                    **({"content": n.content[:500]} if n.content else {}),
+                }
                 for n in news
             ],
         }
@@ -216,7 +300,82 @@ class MarketService:
             ctx["copy_trader_positions"] = self.get_copy_trader_positions()
             ctx["copy_trader_recent_trades"] = self.get_copy_trader_recent_trades()
 
+        # Whale activity for this specific market
+        whale_data = self.get_whale_activity(market.condition_id)
+        if whale_data:
+            ctx["whale_activity"] = whale_data
+
+        # Domain-specific data enrichment
+        football_ctx = self._football.get_football_context(market.question)
+        if football_ctx:
+            ctx["domain_data"] = football_ctx
+
+        crypto_ctx = self._coingecko.get_crypto_context(market.question)
+        if crypto_ctx:
+            ctx["domain_data"] = crypto_ctx
+
         return ctx
+
+    # ── Whale tracking ─────────────────────────────────────────────────────
+
+    def get_top_traders(self, limit: int = 20) -> list[str]:
+        """Fetch top profitable trader addresses from Gamma API leaderboard."""
+        try:
+            resp = self._http.get(
+                f"{POLYMARKET_GAMMA_API}/leaderboard",
+                params={"limit": limit, "window": "volume"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            addresses = [entry.get("address", "") for entry in data if entry.get("address")]
+            logger.info("Fetched %d top trader addresses", len(addresses))
+            return addresses
+        except Exception as exc:
+            logger.debug("Leaderboard fetch failed: %s", exc)
+            return []
+
+    def get_whale_activity(self, condition_id: str) -> list[dict]:
+        """
+        Check if top traders have positions in a specific market.
+        Returns a list of whale positions for the given market.
+        """
+        if not hasattr(self, "_cached_whales"):
+            self._cached_whales = self.get_top_traders(limit=20)
+            self._whale_cache_time = __import__("time").time()
+
+        # Refresh whale list every 30 minutes
+        if __import__("time").time() - getattr(self, "_whale_cache_time", 0) > 1800:
+            self._cached_whales = self.get_top_traders(limit=20)
+            self._whale_cache_time = __import__("time").time()
+
+        whale_positions = []
+        for address in self._cached_whales[:10]:  # Check top 10 to limit API calls
+            try:
+                resp = self._http.get(
+                    f"{POLYMARKET_GAMMA_API}/positions",
+                    params={"user": address, "market": condition_id},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                positions = resp.json()
+                for p in positions:
+                    size = float(p.get("size", 0))
+                    if size > 0:
+                        whale_positions.append({
+                            "address": address[:10] + "...",
+                            "outcome": p.get("outcome", ""),
+                            "size": size,
+                            "avg_price": float(p.get("avgPrice", 0)),
+                        })
+            except Exception:
+                continue
+
+        if whale_positions:
+            logger.info(
+                "Found %d whale positions for market %s",
+                len(whale_positions), condition_id[:12],
+            )
+        return whale_positions
 
     def _summarise_order_book(self, book: dict) -> dict:
         bids = book.get("bids", [])
@@ -230,3 +389,5 @@ class MarketService:
 
     def close(self) -> None:
         self._http.close()
+        self._football.close()
+        self._coingecko.close()

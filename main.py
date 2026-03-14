@@ -127,7 +127,11 @@ class TradingBot:
 
                 result = self.executor.execute(decision)
                 if result and result.success:
-                    self.telegram.send_order_notification(result, decision.reasoning)
+                    self.telegram.send_order_notification(
+                        result, decision.reasoning,
+                        estimated_prob=decision.estimated_probability,
+                        confidence=decision.confidence,
+                    )
                 elif result and not result.success:
                     logger.warning("Order failed: %s", result.error)
 

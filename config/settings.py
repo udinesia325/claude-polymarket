@@ -47,6 +47,18 @@ class Settings(BaseModel):
     notify_on_pnl: bool = Field(default=True)
     pnl_report_interval_hours: int = Field(default=6)
 
+    # ── News / Search ─────────────────────────────────────────────────────────
+    tavily_api_key: str = Field(default="")
+
+    # ── Domain Data APIs ────────────────────────────────────────────────────────
+    football_data_api_key: str = Field(default="")
+
+    # ── Market Focus ──────────────────────────────────────────────────────────
+    # Comma-separated tags/keywords to filter markets (empty = all markets)
+    market_focus_tags: str = Field(default="")
+    # Comma-separated keywords to match in market question
+    market_focus_keywords: str = Field(default="")
+
     # ── Strategy ──────────────────────────────────────────────────────────────
     strategy: str = Field(default="hybrid")
     copy_trader_address: str = Field(default="")
@@ -112,6 +124,10 @@ def load_settings() -> Settings:
         notify_on_order=_bool(os.getenv("NOTIFY_ON_ORDER", "true")),
         notify_on_pnl=_bool(os.getenv("NOTIFY_ON_PNL", "true")),
         pnl_report_interval_hours=int(os.getenv("PNL_REPORT_INTERVAL_HOURS", "6")),
+        tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
+        football_data_api_key=os.getenv("FOOTBALL_DATA_API_KEY", ""),
+        market_focus_tags=os.getenv("MARKET_FOCUS_TAGS", ""),
+        market_focus_keywords=os.getenv("MARKET_FOCUS_KEYWORDS", ""),
         strategy=os.getenv("STRATEGY", "hybrid"),
         copy_trader_address=os.getenv("COPY_TRADER_ADDRESS", ""),
     )

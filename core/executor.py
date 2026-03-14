@@ -93,6 +93,16 @@ class Executor:
                 decision.size_usdc,
                 decision.price,
             )
+            # Register virtual position so deduplication works
+            outcome = "YES" if decision.action == "BUY_YES" else "NO"
+            self.portfolio.add_virtual_position(
+                market_id=decision.market_id,
+                question=decision.market_question,
+                outcome=outcome,
+                token_id=decision.token_id,
+                size_usdc=decision.size_usdc,
+                price=decision.price,
+            )
             return OrderResult(
                 success=True,
                 order_id="DRY_RUN_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),

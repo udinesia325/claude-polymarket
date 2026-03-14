@@ -44,7 +44,13 @@ class TelegramNotifier:
             f"Max exposure: ${self.settings.max_total_exposure_usdc} USDC"
         )
 
-    def send_order_notification(self, result: OrderResult, reasoning: str = "") -> None:
+    def send_order_notification(
+        self,
+        result: OrderResult,
+        reasoning: str = "",
+        estimated_prob: float = 0.0,
+        confidence: float = 0.0,
+    ) -> None:
         if not self.settings.notify_on_order:
             return
 
@@ -55,9 +61,13 @@ class TelegramNotifier:
             f"{status_icon} *Order {result.action}*{dry_tag}",
             f"Market: `{result.market_id[:16]}…`",
             f"Token: `{result.token_id[:16]}…`",
-            f"Size: `${result.size_usdc:.2f} USDC`",
+            f"Size: `${result.size_usdc:.2f} USDC` (Kelly)",
             f"Price: `{result.price:.4f}`",
         ]
+        if estimated_prob > 0:
+            lines.append(f"Est. Probability: `{estimated_prob:.1%}`")
+        if confidence > 0:
+            lines.append(f"Confidence: `{confidence:.1%}`")
         if result.order_id:
             lines.append(f"Order ID: `{result.order_id[:20]}`")
         if not result.success and result.error:

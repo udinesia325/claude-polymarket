@@ -49,6 +49,7 @@ class PortfolioService:
         self.settings = settings
         self.clob = clob_client
         self._positions: dict[str, Position] = {}   # token_id → Position
+        self._virtual_positions: dict[str, Position] = {}  # dry-run positions
         self._realised_pnl: Decimal = Decimal("0")
         self._session_start = datetime.now(timezone.utc)
 
@@ -110,8 +111,15 @@ class PortfolioService:
             new_positions[tid] = pos
 
         self._positions = new_positions
+        # Merge virtual (dry-run) positions into real positions
+        for tid, vpos in self._virtual_positions.items():
+            if tid not in self._positions:
+                self._positions[tid] = vpos
         self._update_current_prices()
-        logger.info("Portfolio refreshed | open positions=%d", len(self._positions))
+        logger.info(
+            "Portfolio refreshed | real=%d | virtual=%d | total=%d",
+            len(new_positions), len(self._virtual_positions), len(self._positions),
+        )
 
     def _update_current_prices(self) -> None:
         for tid, pos in self._positions.items():
@@ -173,6 +181,39 @@ class PortfolioService:
             "total_pnl_usdc": round(unrealised + float(self._realised_pnl), 4),
             "positions": positions_list,
         }
+
+    def add_virtual_position(
+        self,
+        market_id: str,
+        question: str,
+        outcome: str,
+        token_id: str,
+        size_usdc: float,
+        price: float,
+    ) -> None:
+        """Register a dry-run position so deduplication and risk limits work."""
+        size = Decimal(str(size_usdc)) / Decimal(str(price)) if price > 0 else Decimal("0")
+        pos = Position(
+            market_id=market_id,
+            question=question,
+            outcome=outcome,
+            token_id=token_id,
+            size=size,
+            avg_entry_price=Decimal(str(price)),
+            current_price=Decimal(str(price)),
+        )
+        self._virtual_positions[token_id] = pos
+        # Also add to live positions immediately
+        self._positions[token_id] = pos
+        logger.info(
+            "Virtual position added | market=%s | %s | $%.2f",
+            question[:40], outcome, size_usdc,
+        )
+
+    def remove_virtual_position(self, token_id: str) -> None:
+        """Remove a virtual position (e.g. when closing a dry-run position)."""
+        self._virtual_positions.pop(token_id, None)
+        self._positions.pop(token_id, None)
 
     def add_realised_pnl(self, amount: Decimal) -> None:
         self._realised_pnl += amount
