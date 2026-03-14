@@ -91,8 +91,28 @@ class TradingBot:
             self.settings, self.clob, self.portfolio, self.market_svc, self.agent,
         )
 
+        # ── Register Telegram command callbacks ───────────────────────────────
+        self.telegram.register_callbacks(
+            on_scan=self.run_analysis_cycle,
+            on_positions=self._get_positions_summary,
+            on_pnl=self._get_pnl_summary,
+            on_wallet=self.wallet.get_summary,
+        )
+
         # ── Scheduler ─────────────────────────────────────────────────────────
         self.scheduler = BlockingScheduler(timezone="UTC")
+
+    # ── Callback helpers for Telegram commands ────────────────────────────────
+
+    def _get_positions_summary(self) -> dict:
+        """Refresh portfolio and return summary (used by /positions command)."""
+        self.portfolio.refresh()
+        return self.portfolio.get_pnl_summary()
+
+    def _get_pnl_summary(self) -> dict:
+        """Refresh portfolio and return P&L (used by /pnl command)."""
+        self.portfolio.refresh()
+        return self.portfolio.get_pnl_summary()
 
     # ── Main analysis loop ────────────────────────────────────────────────────
 
@@ -120,6 +140,7 @@ class TradingBot:
 
         # 4. Analyse top candidates (limit Claude calls to avoid high cost)
         max_to_analyse = min(5, len(candidates))
+        traded = 0
         for market in candidates[:max_to_analyse]:
             try:
                 ctx = self.market_svc.get_market_context(market)
@@ -127,6 +148,7 @@ class TradingBot:
 
                 result = self.executor.execute(decision)
                 if result and result.success:
+                    traded += 1
                     self.telegram.send_order_notification(
                         result, decision.reasoning,
                         estimated_prob=decision.estimated_probability,
@@ -139,6 +161,8 @@ class TradingBot:
                 logger.exception("Error analysing market %s: %s", market.condition_id, exc)
                 self.telegram.send_error("analysis loop", str(exc))
 
+        # Send scan summary
+        self.telegram.send_scan_result(analysed=max_to_analyse, traded=traded)
         logger.info("── Analysis cycle end ───────────────────────────────────")
 
     def run_position_monitor(self) -> None:
@@ -173,6 +197,9 @@ class TradingBot:
 
         # Ensure USDC is approved for trading
         self.wallet.ensure_usdc_approval()
+
+        # Start Telegram bot command listener (background thread)
+        self.telegram.start_polling()
 
         # Send startup notification
         self.telegram.send_startup()
@@ -227,6 +254,7 @@ class TradingBot:
         self.executor.cancel_all_open_orders()
         self.market_svc.close()
         self.telegram.send_shutdown("user interrupt / process stop")
+        self.telegram.stop_polling()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

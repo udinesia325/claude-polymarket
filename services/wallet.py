@@ -48,7 +48,7 @@ ERC20_ABI = [
 
 # USDC contract addresses
 USDC_ADDRESS = {
-    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",   # Polygon mainnet
+    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",   # Polygon mainnet (USDC.e — digunakan Polymarket)
     80001: "0x0FA8781a83E46826621b3BC094Ea2A0212e71B23",  # Mumbai testnet (deprecated)
     80002: "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",  # Amoy testnet
 }
