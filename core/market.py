@@ -90,10 +90,10 @@ class MarketService:
                     end_date=m.get("endDate", ""),
                     yes_token_id=yes_token.get("tokenId", ""),
                     no_token_id=no_token.get("tokenId", ""),
-                    yes_price=float(yes_token.get("price", 0.5)),
-                    no_price=float(no_token.get("price", 0.5)),
-                    volume_usdc=float(m.get("volume24hr", 0)),
-                    liquidity_usdc=float(m.get("liquidity", 0)),
+                    yes_price=float(yes_token.get("price") or 0.5),
+                    no_price=float(no_token.get("price") or 0.5),
+                    volume_usdc=float(m.get("volume24hr") or 0),
+                    liquidity_usdc=float(m.get("liquidity") or 0),
                     tags=[t.get("label", "") for t in m.get("tags", [])],
                 )
                 markets.append(snapshot)

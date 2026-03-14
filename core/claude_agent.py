@@ -394,10 +394,10 @@ class ClaudeAgent:
             logger.warning("Unknown action %r from Claude, defaulting to SKIP", action)
             action = "SKIP"
 
-        confidence = float(data.get("confidence", 0.0))
-        estimated_prob = float(data.get("estimated_probability", 0.5))
-        price = max(0.01, min(0.99, float(data.get("price", 0.5))))
-        market_yes_price = float(market.get("yes_price", 0.5))
+        confidence = float(data.get("confidence") or 0.0)
+        estimated_prob = float(data.get("estimated_probability") or 0.5)
+        price = max(0.01, min(0.99, float(data.get("price") or 0.5)))
+        market_yes_price = float(market.get("yes_price") or 0.5)
 
         # Kelly Criterion sizing
         size_usdc = self._kelly_criterion_size(estimated_prob, market_yes_price, action)
