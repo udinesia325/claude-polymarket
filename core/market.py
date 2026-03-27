@@ -5,8 +5,9 @@ Market data layer: fetches open markets, order books, copy-trader positions,
 and scrapes news headlines for the hybrid strategy.
 """
 
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -20,6 +21,7 @@ from services.coingecko import CoinGeckoService
 logger = logging.getLogger(__name__)
 
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 
@@ -36,6 +38,9 @@ class MarketSnapshot:
     volume_usdc: float
     liquidity_usdc: float
     tags: list[str]
+    # Polymarket event enrichment (populated from events[].description / eventMetadata)
+    event_description: str = ""   # resolution criteria text
+    event_context: str = ""       # AI-generated market context summary (updated hourly)
 
 
 @dataclass
@@ -79,22 +84,52 @@ class MarketService:
         markets: list[MarketSnapshot] = []
         for m in raw:
             try:
-                tokens = m.get("tokens", [])
-                yes_token = next((t for t in tokens if t.get("outcome") == "Yes"), {})
-                no_token = next((t for t in tokens if t.get("outcome") == "No"), {})
+                # Gamma API returns token IDs in clobTokenIds[] and prices in outcomePrices[]
+                # (NOT in tokens[], which is always empty)
+                clob_ids = m.get("clobTokenIds", [])
+                if isinstance(clob_ids, str):
+                    clob_ids = json.loads(clob_ids)
+                prices = m.get("outcomePrices", [])
+                if isinstance(prices, str):
+                    prices = json.loads(prices)
+                outcomes = m.get("outcomes", ["Yes", "No"])
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+
+                yes_idx = outcomes.index("Yes") if "Yes" in outcomes else 0
+                no_idx = outcomes.index("No") if "No" in outcomes else 1
+
+                yes_token_id = clob_ids[yes_idx] if len(clob_ids) > yes_idx else ""
+                no_token_id = clob_ids[no_idx] if len(clob_ids) > no_idx else ""
+                yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
+                no_price = float(prices[no_idx]) if len(prices) > no_idx else 0.5
+
+                # Tags come from the nested events[0].tags array
+                events = m.get("events", [])
+                event_tags: list[str] = []
+                event_description = ""
+                event_context = ""
+                if events:
+                    ev = events[0]
+                    event_tags = [t.get("label", "") for t in ev.get("tags", [])]
+                    event_description = ev.get("description", "")
+                    meta = ev.get("eventMetadata") or {}
+                    event_context = meta.get("context_description", "")
 
                 snapshot = MarketSnapshot(
                     condition_id=m.get("conditionId", ""),
                     question=m.get("question", ""),
                     slug=m.get("slug", ""),
                     end_date=m.get("endDate", ""),
-                    yes_token_id=yes_token.get("tokenId", ""),
-                    no_token_id=no_token.get("tokenId", ""),
-                    yes_price=float(yes_token.get("price") or 0.5),
-                    no_price=float(no_token.get("price") or 0.5),
+                    yes_token_id=yes_token_id,
+                    no_token_id=no_token_id,
+                    yes_price=yes_price,
+                    no_price=no_price,
                     volume_usdc=float(m.get("volume24hr") or 0),
                     liquidity_usdc=float(m.get("liquidity") or 0),
-                    tags=[t.get("label", "") for t in m.get("tags", [])],
+                    tags=event_tags,
+                    event_description=event_description,
+                    event_context=event_context,
                 )
                 markets.append(snapshot)
             except Exception as exc:
@@ -160,7 +195,7 @@ class MarketService:
 
         try:
             resp = self._http.get(
-                f"{POLYMARKET_GAMMA_API}/positions",
+                f"{POLYMARKET_DATA_API}/positions",
                 params={"user": address, "sizeThreshold": "0.01"},
             )
             resp.raise_for_status()
@@ -181,7 +216,7 @@ class MarketService:
 
         try:
             resp = self._http.get(
-                f"{POLYMARKET_GAMMA_API}/activity",
+                f"{POLYMARKET_DATA_API}/activity",
                 params={"user": address, "limit": limit},
             )
             resp.raise_for_status()
@@ -192,15 +227,43 @@ class MarketService:
 
     # ── News ──────────────────────────────────────────────────────────────────
 
-    def scrape_news_for_market(self, question: str, max_items: int = 5) -> list[NewsItem]:
+    def scrape_news_for_market(
+        self,
+        question: str,
+        max_items: int = 5,
+        event_context: str = "",
+    ) -> list[NewsItem]:
         """
         Fetch news relevant to a market question.
         Uses Tavily Search API if configured (returns full content snippets),
         falls back to Google News RSS (headlines only).
+        event_context is Polymarket's AI-generated summary — used to build
+        a richer, entity-focused search query.
         """
+        query = self._build_news_query(question, event_context)
         if self.settings.tavily_api_key:
-            return self._tavily_search(question, max_items)
-        return self._google_news_rss(question, max_items)
+            return self._tavily_search(query, max_items)
+        return self._google_news_rss(query, max_items)
+
+    def _build_news_query(self, question: str, event_context: str) -> str:
+        """
+        Build a focused news search query by extracting key named entities
+        from the Polymarket event context description.
+        Falls back to the market question if context is empty.
+        """
+        if not event_context:
+            return question
+
+        # Extract the first sentence of the context as the most current signal
+        first_sentence = event_context.split(".")[0].strip()
+
+        # Keep query concise: question keywords + first context sentence (truncated)
+        question_words = " ".join(question.split()[:8])
+        context_snippet = first_sentence[:120] if len(first_sentence) > 120 else first_sentence
+
+        query = f"{question_words} {context_snippet}"
+        logger.debug("News query built from context: %r", query[:100])
+        return query
 
     def _tavily_search(self, question: str, max_items: int = 5) -> list[NewsItem]:
         """Search via Tavily API — returns title + content snippets."""
@@ -268,7 +331,10 @@ class MarketService:
         - relevant news headlines
         - copy-trader activity (if enabled)
         """
-        news = self.scrape_news_for_market(market.question)
+        news = self.scrape_news_for_market(
+            market.question,
+            event_context=market.event_context,
+        )
         order_book = self.get_order_book(market.yes_token_id)
 
         ctx: dict = {
@@ -295,6 +361,12 @@ class MarketService:
                 for n in news
             ],
         }
+
+        # Polymarket event enrichment: resolution criteria + hourly-updated context
+        if market.event_description:
+            ctx["resolution_criteria"] = market.event_description[:600]
+        if market.event_context:
+            ctx["polymarket_context"] = market.event_context[:800]
 
         if self.settings.strategy in ("copy_trader", "hybrid"):
             ctx["copy_trader_positions"] = self.get_copy_trader_positions()
@@ -377,14 +449,25 @@ class MarketService:
             )
         return whale_positions
 
-    def _summarise_order_book(self, book: dict) -> dict:
-        bids = book.get("bids", [])
-        asks = book.get("asks", [])
+    def _summarise_order_book(self, book) -> dict:
+        """Handle both dict and OrderBookSummary object from py-clob-client."""
+        if hasattr(book, "bids"):
+            # OrderBookSummary object: bids/asks are lists of OrderSummary with .price/.size
+            bids = book.bids or []
+            asks = book.asks or []
+            def _price(x): return float(x.price)
+            def _size(x): return float(x.size)
+        else:
+            bids = book.get("bids", []) if book else []
+            asks = book.get("asks", []) if book else []
+            def _price(x): return float(x.get("price", 0))
+            def _size(x): return float(x.get("size", 0))
+
         return {
-            "best_bid": float(bids[0]["price"]) if bids else None,
-            "best_ask": float(asks[0]["price"]) if asks else None,
-            "bid_depth_3": sum(float(b.get("size", 0)) for b in bids[:3]),
-            "ask_depth_3": sum(float(a.get("size", 0)) for a in asks[:3]),
+            "best_bid": _price(bids[0]) if bids else None,
+            "best_ask": _price(asks[0]) if asks else None,
+            "bid_depth_3": sum(_size(b) for b in bids[:3]),
+            "ask_depth_3": sum(_size(a) for a in asks[:3]),
         }
 
     def close(self) -> None:

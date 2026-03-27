@@ -125,10 +125,15 @@ class PortfolioService:
         for tid, pos in self._positions.items():
             try:
                 book = self.clob.get_order_book(token_id=tid)
-                # Best bid as "current price" for YESs
-                bids = book.get("bids", [])
-                if bids:
-                    pos.current_price = Decimal(str(bids[0].get("price", pos.avg_entry_price)))
+                # Handle both OrderBookSummary object and plain dict
+                if hasattr(book, "bids"):
+                    bids = book.bids or []
+                    best_bid = bids[0].price if bids else None
+                else:
+                    bids = book.get("bids", []) if book else []
+                    best_bid = bids[0].get("price") if bids else None
+                if best_bid is not None:
+                    pos.current_price = Decimal(str(best_bid))
             except Exception as exc:
                 logger.debug("Could not update price for %s: %s", tid, exc)
 

@@ -233,6 +233,14 @@ class ClaudeAgent:
             f"## Order Book Summary\n{json.dumps(order_book, indent=2)}",
         ]
 
+        # Polymarket's hourly-updated AI context for this market (resolution criteria + current state)
+        resolution_criteria = ctx.get("resolution_criteria", "")
+        polymarket_context = ctx.get("polymarket_context", "")
+        if resolution_criteria:
+            parts.append(f"## Resolution Criteria\n{resolution_criteria}")
+        if polymarket_context:
+            parts.append(f"## Polymarket Context (updated hourly)\n{polymarket_context}")
+
         if news:
             news_parts = []
             for n in news[:5]:
@@ -406,10 +414,14 @@ class ClaudeAgent:
         size_usdc *= confidence
 
         # Enforce minimum trade size
-        if size_usdc < 0.50:
+        # $0.25 floor: with MAX_ORDER_SIZE=$5 and KELLY_FRACTION=0.20 the theoretical
+        # max size is $1.00, so $0.50 would reject most valid trades.
+        MIN_TRADE_SIZE = 0.25
+        if size_usdc < MIN_TRADE_SIZE:
             if action != "SKIP":
                 logger.info(
-                    "Kelly size $%.2f too small (< $0.50), converting to SKIP", size_usdc,
+                    "Kelly size $%.2f too small (< $%.2f), converting to SKIP",
+                    size_usdc, MIN_TRADE_SIZE,
                 )
                 action = "SKIP"
             size_usdc = 0.0
